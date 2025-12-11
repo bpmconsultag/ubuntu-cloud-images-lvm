@@ -7,7 +7,7 @@ on:
 
 jobs:
   convert-and-upload:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     strategy:
       matrix:
         include:
@@ -32,6 +32,7 @@ jobs:
         run: |
           chmod +x ./convert-image-to-lvm.sh
           export LIBGUESTFS_BACKEND=direct
+          export LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1
           ./convert-image-to-lvm.sh ${{ matrix.image_file }} ${{ matrix.lvm_file }}
 
       - name: Upload LVM image artifact
