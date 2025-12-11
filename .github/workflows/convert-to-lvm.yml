@@ -31,6 +31,7 @@ jobs:
       - name: Convert image to LVM
         run: |
           chmod +x ./convert-image-to-lvm.sh
+          export LIBGUESTFS_BACKEND=direct
           ./convert-image-to-lvm.sh ${{ matrix.image_file }} ${{ matrix.lvm_file }}
 
       - name: Upload LVM image artifact
