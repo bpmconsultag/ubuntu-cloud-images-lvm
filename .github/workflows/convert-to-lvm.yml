@@ -1,0 +1,40 @@
+name: Convert Ubuntu Cloud Image to LVM
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  convert-and-upload:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - version: "24.04"
+            image_url: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+            image_file: "ubuntu-24.04-server-cloudimg-amd64.img"
+            lvm_file: "lvm-ubuntu-24.04.img"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lvm2 qemu-utils wget
+
+      - name: Download Ubuntu Cloud Image
+        run: |
+          wget -O ${{ matrix.image_file }} ${{ matrix.image_url }}
+
+      - name: Convert image to LVM
+        run: |
+          chmod +x ./convert-image-to-lvm.sh
+          ./convert-image-to-lvm.sh ${{ matrix.image_file }} ${{ matrix.lvm_file }}
+
+      - name: Upload LVM image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.lvm_file }}
+          path: ${{ matrix.lvm_file }}
