@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y lvm2 qemu-utils wget
+          sudo apt-get install -y lvm2 qemu-utils libguestfs-tools wget
 
       - name: Download Ubuntu Cloud Image
         run: |
