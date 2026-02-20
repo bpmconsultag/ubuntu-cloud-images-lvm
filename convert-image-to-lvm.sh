@@ -283,20 +283,6 @@ GRUB_CMDLINE_LINUX="root=/dev/$VG_NAME/$LV_ROOT_NAME"
 GRUB_DISABLE_OS_PROBER=true
 GRUB_EOF
 
-cat > "$WORK_DIR/99-lvm.cfg" << CLOUD_EOF
-# LVM configuration - applied on first boot
-packages:
-  - lvm2
-  - grub-pc
-  - grub-efi-amd64
-
-runcmd:
-  - update-initramfs -u -k all
-  - grub-install --target=i386-pc /dev/vda || grub-install --target=i386-pc /dev/sda || true
-  - grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable || true
-  - update-grub
-CLOUD_EOF
-
 # Copy the config files into the image
 guestfish --rw -a "$OUTPUT_IMAGE" -i <<EOF
 mkdir-p /etc/initramfs-tools/conf.d
