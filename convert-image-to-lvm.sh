@@ -290,7 +290,6 @@ mkdir-p /etc/cloud/cloud.cfg.d
 copy-in $WORK_DIR/fstab /etc
 copy-in $WORK_DIR/grub /etc/default
 copy-in $WORK_DIR/lvm.conf /etc/initramfs-tools/conf.d
-copy-in $WORK_DIR/99-lvm.cfg /etc/cloud/cloud.cfg.d
 mv /etc/initramfs-tools/conf.d/lvm.conf /etc/initramfs-tools/conf.d/lvm
 EOF
 
