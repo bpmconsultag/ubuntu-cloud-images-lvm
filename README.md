@@ -1,6 +1,21 @@
 # Ubuntu Cloud Images LVM Converter
 
+[![Build Status](https://github.com/bpmconsultag/ubuntu-cloud-images-lvm/actions/workflows/convert-to-lvm.yml/badge.svg)](https://github.com/bpmconsultag/ubuntu-cloud-images-lvm/actions/workflows/convert-to-lvm.yml)
+
 This project provides a script and CI pipeline to convert Ubuntu cloud images to LVM format and publish the result as a GitHub Actions artifact.
+
+## Latest Build Artifacts
+
+Pre-built images are available as GitHub Actions artifacts from the latest workflow run.
+Download the image for your Ubuntu version from the **Artifacts** section at the bottom of the latest run:
+
+**[Download latest build artifacts →](https://github.com/bpmconsultag/ubuntu-cloud-images-lvm/actions/workflows/convert-to-lvm.yml)**
+
+| Image | Artifact name |
+| ----- | ------------- |
+| Ubuntu 24.04 (amd64) | `lvm-ubuntu-24.04.qcow2` |
+| Ubuntu 26.04 (amd64) | `lvm-ubuntu-26.04.qcow2` |
+| Ubuntu 26.04 (amd64v3) | `lvm-ubuntu-26.04v3.qcow2` |
 
 These images are based on the official Ubuntu Cloud Images provided by Canonical Ltd. (https://cloud-images.ubuntu.com/).
 

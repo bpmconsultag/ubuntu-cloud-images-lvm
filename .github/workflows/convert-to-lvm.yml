@@ -3,7 +3,7 @@ name: Convert Ubuntu Cloud Image to LVM
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ '**' ]
 
 jobs:
   convert-and-upload:
@@ -14,7 +14,15 @@ jobs:
           - version: "24.04"
             image_url: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
             image_file: "ubuntu-24.04-server-cloudimg-amd64.img"
-            lvm_file: "lvm-ubuntu-24.04.img"
+            lvm_file: "lvm-ubuntu-24.04.qcow2"
+          - version: "26.04"
+            image_url: "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img"
+            image_file: "ubuntu-26.04-server-cloudimg-amd64.img"
+            lvm_file: "lvm-ubuntu-26.04.qcow2"
+          - version: "26.04v3"
+            image_url: "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64v3.img"
+            image_file: "ubuntu-26.04-server-cloudimg-amd64v3.img"
+            lvm_file: "lvm-ubuntu-26.04v3.qcow2"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,14 +30,18 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y lvm2 qemu-utils libguestfs-tools passt wget
+          sudo apt-get install -y lvm2 qemu-utils libguestfs-tools wget
 
-      - name: Make kernel readable for libguestfs
+      - name: Configure environment for libguestfs
         run: |
           # On Ubuntu the kernel image in /boot is mode 0600 (root only), so the
           # non-root libguestfs appliance cannot read it and supermin fails with
           # "cp: cannot open '/boot/vmlinuz-*' for reading: Permission denied".
           sudo chmod 0644 /boot/vmlinuz-*
+
+          # Allow KVM access so libguestfs can use hardware acceleration;
+          # without this it falls back to TCG (much slower).
+          sudo chmod 0666 /dev/kvm || true
 
       - name: Download Ubuntu Cloud Image
         run: |
