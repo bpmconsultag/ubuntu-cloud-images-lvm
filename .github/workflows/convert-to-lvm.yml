@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y lvm2 qemu-utils libguestfs-tools passt wget
+          sudo apt-get install -y lvm2 qemu-utils libguestfs-tools wget
 
       - name: Configure environment for libguestfs
         run: |
@@ -31,15 +31,9 @@ jobs:
           # "cp: cannot open '/boot/vmlinuz-*' for reading: Permission denied".
           sudo chmod 0644 /boot/vmlinuz-*
 
-          # Allow KVM access for the runner user so libguestfs can use hardware
-          # acceleration; without this it falls back to TCG (very slow).
+          # Allow KVM access so libguestfs can use hardware acceleration;
+          # without this it falls back to TCG (much slower).
           sudo chmod 0666 /dev/kvm || true
-
-          # passt (the QEMU user-mode networking backend used by libguestfs/
-          # virt-customize for --update / --install) requires unprivileged ICMP,
-          # which is gated by ping_group_range. The default on some kernels
-          # (1 0) blocks it entirely; allow all UIDs so passt can start.
-          sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
 
       - name: Download Ubuntu Cloud Image
         run: |

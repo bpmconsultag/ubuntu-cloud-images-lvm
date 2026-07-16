@@ -17,9 +17,9 @@
 #     or DKMS modules (enable with GENERATE_MOK=true).
 #
 # Requirements:
-#   - qemu-img
-#   - guestfish, virt-customize, virt-resize (from libguestfs-tools)
-#   - No root access required (uses libguestfs appliance)
+#   - qemu-img, qemu-nbd (from qemu-utils)
+#   - guestfish, virt-tar-out (from libguestfs-tools)
+#   - sudo (needed for NBD mount, chroot, LVM activation, and grub-install)
 
 set -e
 
@@ -105,7 +105,7 @@ usage() {
 check_requirements() {
     local missing=()
 
-    for cmd in qemu-img guestfish virt-customize virt-tar-out; do
+    for cmd in qemu-img qemu-nbd guestfish virt-tar-out; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
@@ -114,6 +114,11 @@ check_requirements() {
     if [ ${#missing[@]} -ne 0 ]; then
         log_error "Missing required tools: ${missing[*]}"
         echo "Install with: apt install qemu-utils libguestfs-tools"
+        exit 1
+    fi
+
+    if ! sudo -n true 2>/dev/null; then
+        log_error "sudo (passwordless) is required for NBD mount, chroot, and grub-install"
         exit 1
     fi
 
@@ -149,7 +154,72 @@ validate_source_image
 
 # Create a temporary directory for work files
 WORK_DIR=$(mktemp -d)
-trap 'rm -rf "$WORK_DIR"' EXIT
+CHROOT_DIR=""
+NBD_DEVICE=""
+
+teardown_chroot() {
+    [ -z "$CHROOT_DIR" ] && return
+    log_info "Unmounting chroot..."
+    for vfs in dev/pts dev run sys proc boot/efi boot; do
+        sudo umount "$CHROOT_DIR/$vfs" 2>/dev/null || true
+    done
+    sudo umount "$CHROOT_DIR" 2>/dev/null || true
+    rmdir "$CHROOT_DIR" 2>/dev/null || true
+    CHROOT_DIR=""
+    if [ -n "$NBD_DEVICE" ]; then
+        sudo vgchange -an "$VG_NAME" 2>/dev/null || true
+        sudo qemu-nbd --disconnect "$NBD_DEVICE" 2>/dev/null || true
+        NBD_DEVICE=""
+    fi
+}
+
+setup_chroot() {
+    log_info "Mounting image via NBD for chroot operations..."
+
+    sudo modprobe nbd max_part=8 2>/dev/null || true
+    sleep 1
+
+    # Find a free NBD device
+    local dev
+    for dev in /dev/nbd{0..15}; do
+        if [ -b "$dev" ] && [ -z "$(sudo lsblk -n -o NAME "$dev" 2>/dev/null | tail -n +2)" ]; then
+            NBD_DEVICE="$dev"
+            break
+        fi
+    done
+    if [ -z "$NBD_DEVICE" ]; then
+        log_error "No free NBD device found (is the nbd kernel module loaded?)"
+        exit 1
+    fi
+
+    sudo qemu-nbd --connect="$NBD_DEVICE" "$OUTPUT_IMAGE"
+    sleep 2
+    sudo partprobe "$NBD_DEVICE" 2>/dev/null || true
+    sleep 1
+
+    # Activate the LVM volume group
+    sudo vgscan --mknodes 2>/dev/null || true
+    sudo vgchange -ay "$VG_NAME"
+
+    CHROOT_DIR=$(mktemp -d)
+    sudo mount "/dev/$VG_NAME/$LV_ROOT_NAME" "$CHROOT_DIR"
+    sudo mkdir -p "$CHROOT_DIR/boot" "$CHROOT_DIR/boot/efi"
+    sudo mount "${NBD_DEVICE}p3" "$CHROOT_DIR/boot"
+    sudo mount "${NBD_DEVICE}p2" "$CHROOT_DIR/boot/efi"
+
+    # Bind-mount virtual filesystems needed by apt / grub-install / update-initramfs
+    for vfs in dev dev/pts proc sys run; do
+        sudo mkdir -p "$CHROOT_DIR/$vfs"
+        sudo mount --bind "/$vfs" "$CHROOT_DIR/$vfs"
+    done
+
+    # Provide DNS resolution inside the chroot
+    sudo cp /etc/resolv.conf "$CHROOT_DIR/etc/resolv.conf"
+
+    log_info "Chroot ready at $CHROOT_DIR (device: $NBD_DEVICE)"
+}
+
+trap 'teardown_chroot; rm -rf "$WORK_DIR"' EXIT
 
 log_info "Working directory: $WORK_DIR"
 
@@ -322,7 +392,12 @@ copy-in $WORK_DIR/lvm.conf /etc/initramfs-tools/conf.d
 mv /etc/initramfs-tools/conf.d/lvm.conf /etc/initramfs-tools/conf.d/lvm
 EOF
 
-# Step 6: Install GRUB and rebuild initramfs using virt-customize
+# Step 6: Install packages and configure bootloader via NBD+chroot.
+# virt-customize is intentionally avoided here: it always starts a QEMU
+# network stack (passt) even for commands that need no internet access, which
+# fails in restricted CI/container environments. The NBD+chroot approach mounts
+# the image as a block device and runs apt/grub-install/update-initramfs
+# directly on the host, which is reliable and needs no special network setup.
 log_info "Installing bootloader and rebuilding initramfs..."
 
 # Assemble the package list. Secure Boot requires the Microsoft-signed shim,
@@ -334,110 +409,94 @@ log_info "Installing bootloader and rebuilding initramfs..."
 # drags unrelated packages like qemu-guest-agent into "unmet dependencies".
 # The -bin packages ship the platform modules, coexist fine, and this script
 # already runs grub-install for both targets manually.
-INSTALL_PACKAGES="lvm2,grub-pc-bin,grub-efi-amd64-bin,qemu-guest-agent"
+INSTALL_PACKAGES="lvm2 grub-pc-bin grub-efi-amd64-bin qemu-guest-agent"
 if [ "$SECURE_BOOT" = "true" ]; then
     log_info "Secure Boot enabled: adding signed shim/GRUB and MOK tooling"
-    INSTALL_PACKAGES="$INSTALL_PACKAGES,shim-signed,grub-efi-amd64-signed,mokutil,sbsigntool,efibootmgr,openssl"
+    INSTALL_PACKAGES="$INSTALL_PACKAGES shim-signed grub-efi-amd64-signed mokutil sbsigntool efibootmgr openssl"
 fi
 
-# First install packages and update initramfs.
-# Refresh the package indexes before installing; stale indexes are a common
-# cause of silent install failures. Do NOT swallow errors here: if a package
-# (e.g. qemu-guest-agent) fails to install the whole conversion must fail
-# loudly instead of producing an image with missing packages.
-virt-customize -a "$OUTPUT_IMAGE" \
-    --update \
-    --install "$INSTALL_PACKAGES" \
-    --run-command "update-initramfs -u -k all"
+setup_chroot
 
-# SELinux relabelling is only meaningful on SELinux-based guests; on Ubuntu it
-# is a no-op and may emit warnings, so keep it separate and tolerant.
-virt-customize -a "$OUTPUT_IMAGE" --selinux-relabel 2>/dev/null || true
+# Refresh package index and install required tools inside the guest filesystem.
+# Do NOT swallow errors: a missing package must fail loudly here rather than
+# producing a silently broken image.
+sudo chroot "$CHROOT_DIR" apt-get update -q
+# shellcheck disable=SC2086  # word splitting intentional for package list
+sudo chroot "$CHROOT_DIR" apt-get install -y $INSTALL_PACKAGES
 
-# Install GRUB bootloader (legacy BIOS on /dev/sda + UEFI on the ESP)
+# Rebuild initramfs so it includes LVM support
+sudo chroot "$CHROOT_DIR" update-initramfs -u -k all
+
+# Regenerate the GRUB configuration
+sudo chroot "$CHROOT_DIR" update-grub
+
+# Install GRUB for legacy BIOS boot (target device = NBD block device)
+sudo chroot "$CHROOT_DIR" grub-install --target=i386-pc --recheck "$NBD_DEVICE"
+
 if [ "$SECURE_BOOT" = "true" ]; then
-    # Create a script that installs the Secure Boot chain inside the image.
-    # It is run through virt-customize so the guest tooling (grub-install,
-    # shim, openssl, mokutil) does the heavy lifting.
-    cat > "$WORK_DIR/setup-secureboot.sh" << SECUREBOOT_EOF
-#!/bin/bash
-set -e
-
-EFI_DIR=/boot/efi
-UBUNTU_EFI="\$EFI_DIR/EFI/ubuntu"
-BOOT_EFI="\$EFI_DIR/EFI/BOOT"
-
-# Install the signed GRUB via shim for Secure Boot. --no-nvram is required
-# because there is no EFI runtime (efivars) inside the offline appliance.
-grub-install --target=x86_64-efi --efi-directory="\$EFI_DIR" \\
-    --bootloader-id=ubuntu --uefi-secure-boot --no-nvram --recheck
-
-# Make sure the Microsoft-signed shim is present as the first-stage loader.
-if [ ! -f "\$UBUNTU_EFI/shimx64.efi" ]; then
-    for shim in /usr/lib/shim/shimx64.efi.signed.latest /usr/lib/shim/shimx64.efi.signed; do
-        if [ -f "\$shim" ]; then
-            cp "\$shim" "\$UBUNTU_EFI/shimx64.efi"
-            break
-        fi
-    done
-fi
-
-# MokManager, used to enrol a Machine Owner Key from the firmware.
-if [ ! -f "\$UBUNTU_EFI/mmx64.efi" ]; then
-    for mm in /usr/lib/shim/mmx64.efi.signed /usr/lib/shim/mmx64.efi; do
-        if [ -f "\$mm" ]; then
-            cp "\$mm" "\$UBUNTU_EFI/mmx64.efi"
-            break
-        fi
-    done
-fi
-
-# Provide the removable/default boot path so the image also boots on firmware
-# that has no matching NVRAM entry (typical for freshly deployed cloud images).
-mkdir -p "\$BOOT_EFI"
-cp "\$UBUNTU_EFI/shimx64.efi" "\$BOOT_EFI/BOOTX64.EFI"
-cp "\$UBUNTU_EFI/grubx64.efi" "\$BOOT_EFI/grubx64.efi"
-[ -f "\$UBUNTU_EFI/mmx64.efi" ] && cp "\$UBUNTU_EFI/mmx64.efi" "\$BOOT_EFI/mmx64.efi"
-
-# Optionally generate a Machine Owner Key (MOK) for signing custom kernels or
-# DKMS modules. It is stored in the standard Ubuntu location so DKMS picks it
-# up automatically. Enrolment must be completed interactively at first boot
-# (see MOK.der copied onto the ESP).
-if [ "$GENERATE_MOK" = "true" ]; then
-    MOK_DIR=/var/lib/shim-signed/mok
-    mkdir -p "\$MOK_DIR"
-    if [ ! -f "\$MOK_DIR/MOK.der" ]; then
-        openssl req -new -x509 -newkey rsa:2048 -nodes \\
-            -keyout "\$MOK_DIR/MOK.priv" \\
-            -outform DER -out "\$MOK_DIR/MOK.der" \\
-            -days 36500 -subj "$MOK_SUBJECT"
-        chmod 600 "\$MOK_DIR/MOK.priv"
-    fi
-    # Copy the public key onto the ESP so it can be enrolled via MokManager
-    # (Enroll key from disk) or 'mokutil --import' on the running system.
-    cp "\$MOK_DIR/MOK.der" "\$EFI_DIR/MOK.der"
-fi
-SECUREBOOT_EOF
-
     log_info "Installing Secure Boot bootloader chain (shim -> signed GRUB)..."
-    virt-customize -a "$OUTPUT_IMAGE" \
-        --run-command "update-initramfs -u" \
-        --run-command "update-grub" \
-        --run-command "grub-install --target=i386-pc --recheck /dev/sda" \
-        --run "$WORK_DIR/setup-secureboot.sh"
+    local_efi="$CHROOT_DIR/boot/efi"
+    UBUNTU_EFI="$local_efi/EFI/ubuntu"
+    BOOT_EFI="$local_efi/EFI/BOOT"
+
+    # Install the signed GRUB via shim for Secure Boot. --no-nvram is required
+    # because there is no EFI runtime (efivars) available outside a running system.
+    sudo chroot "$CHROOT_DIR" grub-install --target=x86_64-efi \
+        --efi-directory=/boot/efi --bootloader-id=ubuntu \
+        --uefi-secure-boot --no-nvram --recheck
+
+    # Ensure the Microsoft-signed shim is present as the first-stage loader
+    if [ ! -f "$UBUNTU_EFI/shimx64.efi" ]; then
+        for shim in \
+            "$CHROOT_DIR/usr/lib/shim/shimx64.efi.signed.latest" \
+            "$CHROOT_DIR/usr/lib/shim/shimx64.efi.signed"; do
+            if [ -f "$shim" ]; then
+                sudo cp "$shim" "$UBUNTU_EFI/shimx64.efi"
+                break
+            fi
+        done
+    fi
+
+    # MokManager, used to enrol a Machine Owner Key from the firmware
+    if [ ! -f "$UBUNTU_EFI/mmx64.efi" ]; then
+        for mm in \
+            "$CHROOT_DIR/usr/lib/shim/mmx64.efi.signed" \
+            "$CHROOT_DIR/usr/lib/shim/mmx64.efi"; do
+            if [ -f "$mm" ]; then
+                sudo cp "$mm" "$UBUNTU_EFI/mmx64.efi"
+                break
+            fi
+        done
+    fi
+
+    # Provide the removable/default boot path so the image boots on firmware
+    # that has no matching NVRAM entry (typical for freshly deployed cloud images)
+    sudo mkdir -p "$BOOT_EFI"
+    sudo cp "$UBUNTU_EFI/shimx64.efi"  "$BOOT_EFI/BOOTX64.EFI"
+    sudo cp "$UBUNTU_EFI/grubx64.efi"  "$BOOT_EFI/grubx64.efi"
+    [ -f "$UBUNTU_EFI/mmx64.efi" ] && sudo cp "$UBUNTU_EFI/mmx64.efi" "$BOOT_EFI/mmx64.efi"
 
     if [ "$GENERATE_MOK" = "true" ]; then
+        MOK_DIR="$CHROOT_DIR/var/lib/shim-signed/mok"
+        sudo mkdir -p "$MOK_DIR"
+        if [ ! -f "$MOK_DIR/MOK.der" ]; then
+            sudo openssl req -new -x509 -newkey rsa:2048 -nodes \
+                -keyout "$MOK_DIR/MOK.priv" \
+                -outform DER -out "$MOK_DIR/MOK.der" \
+                -days 36500 -subj "$MOK_SUBJECT"
+            sudo chmod 600 "$MOK_DIR/MOK.priv"
+        fi
+        sudo cp "$MOK_DIR/MOK.der" "$local_efi/MOK.der"
         log_warn "MOK generated at /var/lib/shim-signed/mok/ and /boot/efi/MOK.der"
         log_warn "Enrol it at first boot with: sudo mokutil --import /boot/efi/MOK.der"
     fi
 else
-    # Install GRUB bootloader (unsigned, BIOS + UEFI)
-    virt-customize -a "$OUTPUT_IMAGE" \
-        --run-command "update-initramfs -u" \
-        --run-command "update-grub" \
-        --run-command "grub-install /dev/sda" \
-        --run-command "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --recheck"
+    # Non-secure-boot UEFI GRUB
+    sudo chroot "$CHROOT_DIR" grub-install --target=x86_64-efi \
+        --efi-directory=/boot/efi --bootloader-id=ubuntu --no-nvram --recheck
 fi
+
+teardown_chroot
 
 # Step 7: Compress the output image
 log_info "Compressing output image..."
