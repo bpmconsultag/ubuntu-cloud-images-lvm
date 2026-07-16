@@ -213,8 +213,12 @@ setup_chroot() {
         sudo mount --bind "/$vfs" "$CHROOT_DIR/$vfs"
     done
 
-    # Provide DNS resolution inside the chroot
-    sudo cp /etc/resolv.conf "$CHROOT_DIR/etc/resolv.conf"
+    # Provide DNS resolution inside the chroot.
+    # On systemd-resolved hosts /etc/resolv.conf is a symlink into /run/; since
+    # /run is already bind-mounted above, both paths may resolve to the same
+    # inode — cp would error in that case. Suppress the error: DNS works either
+    # way because /run is already shared with the chroot.
+    sudo cp /etc/resolv.conf "$CHROOT_DIR/etc/resolv.conf" 2>/dev/null || true
 
     log_info "Chroot ready at $CHROOT_DIR (device: $NBD_DEVICE)"
 }
