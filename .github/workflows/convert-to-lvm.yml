@@ -14,7 +14,7 @@ jobs:
           - version: "24.04"
             image_url: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
             image_file: "ubuntu-24.04-server-cloudimg-amd64.img"
-            lvm_file: "lvm-ubuntu-24.04.img"
+            lvm_file: "lvm-ubuntu-24.04.qcow2"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
