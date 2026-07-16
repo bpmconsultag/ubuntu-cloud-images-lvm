@@ -3,7 +3,7 @@ name: Convert Ubuntu Cloud Image to LVM
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ '**' ]
 
 jobs:
   convert-and-upload:
