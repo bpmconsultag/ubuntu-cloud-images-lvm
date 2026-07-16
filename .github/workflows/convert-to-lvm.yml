@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y lvm2 qemu-utils libguestfs-tools wget
+          sudo apt-get install -y lvm2 qemu-utils libguestfs-tools passt wget
 
       - name: Make kernel readable for libguestfs
         run: |
